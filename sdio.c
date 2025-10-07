@@ -1272,22 +1272,35 @@ int mmc_attach_sdio(struct mmc_host *host)
 
 	WARN_ON(!host->claimed);
 
-	err = mmc_send_io_op_cond(host, 0, &ocr);
-	if (err)
-		return err;
+	pr_info("SDIO_ATTACH: Starting SDIO attachment process\n");
 
+	/* Step 1. Basic Communication */
+	pr_info("SDIO_ATTACH: Step 1 - Send IO_OP_COND\n" );
+	err = mmc_send_io_op_cond(host, 0, &ocr);
+	if (err) {
+		pr_err("SDIO_ATTACH: Step 1 failed, mmc_send_io_op_cond error: %d\n", err);
+		return err;
+	}
+	pr_info("SDIO_ATTACH: Step 1 completed, OCR: 0x%08x\n", ocr);
+
+	/* Step 2. Bus Attachment */
+	pr_info("SDIO_ATTACH: Step 2 - Attach SDIO bus\n");
 	mmc_attach_bus(host, &mmc_sdio_ops);
 	if (host->ocr_avail_sdio)
 		host->ocr_avail = host->ocr_avail_sdio;
+	pr_info("SDIO_ATTACH: Step 2 completed, host->ocr_avail: 0x%08x\n", host->ocr_avail);
 
-
+	/* Step 3. Voltage Selection */
+	pr_info("SDIO_ATTACH: Step 3 - Selecting voltage\n");
 	rocr = mmc_select_voltage(host, ocr);
+	pr_info("SDIO_ATTACH: Selected voltage, ROCR: 0x%08x\n", rocr);
 
 	/*
 	 * Can we support the voltage(s) of the card(s)?
 	 */
 	if (!rocr) {
 		err = -EINVAL;
+		pr_err("SDIO_ATTACH: Step 3 failed, voltage not supported\n");
 		pr_err("%s: voltage(s) of the card not supported\n", mmc_hostname(host));
 		goto err;
 	}
@@ -1295,84 +1308,161 @@ int mmc_attach_sdio(struct mmc_host *host)
 	/*
 	 * Detect and init the card.
 	 */
+	/* Step 4. Card Initializtion */
+	pr_info("SDIO_ATTACH: Step 4 - About to call mmc_sdio_init_card\n");
+	pr_info("SDIO_ATTACH: Host state before init - power: %d, clock: %u, voltage: %d\n",
+		host->ios.power_mode, host->ios.clock, host->ios.signal_voltage);
+	
 	err = mmc_sdio_init_card(host, rocr, NULL);
+	pr_info("SDIO_ATTACH: mmc_sdio_init_card returned: %d\n", err);
+	pr_info("SDIO_ATTACH: Host state after init - power: %d, clock: %u, voltage: %d\n",
+		host->ios.power_mode, host->ios.clock, host->ios.signal_voltage);
+
 	if (err) {
+		pr_err("SDIO_ATTACH: Step 4 FAILED, mmc_sdio_init_card error: %d\n", err);
 		pr_err("%s: fail to initializing the card\n", mmc_hostname(host));
 		goto err;
 	}
+	pr_info("SDIO_ATTACH: Step 4 completed successfully\n");
 
+	/* Step 5. Card State Check */
+	pr_info("SDIO_ATTACH: Step 5 - Checking card state\n");
 	card = host->card;
+	if (!card) {
+		pr_err("SDIO_ATTACH: ERROR - host->card is NULL after init!\n");
+		err = -ENODEV;
+		goto err;
+	}
+	pr_info("SDIO_ATTACH: Card found - type: %d, vendor: 0x%04x, device: 0x%04x\n",
+		card->type, card->cis.vendor, card->cis.device);
 
 	/*
 	 * Enable runtime PM only if supported by host+card+board
 	 */
+	/* Step 6. Power Management */
+	pr_info("SDIO_ATTACH: Step 6 - Setting up runtime PM\n");
 	if (host->caps & MMC_CAP_POWER_OFF_CARD) {
 		/*
 		 * Do not allow runtime suspend until after SDIO function
 		 * devices are added.
 		 */
+		pr_info("SDIO_ATTACH: Host supports power off, enabling runtime PM\n");
+
 		pm_runtime_get_noresume(&card->dev);
+		pr_info("SDIO_ATTACH: pm_runtime_get_noresume completed\n");
 
 		/*
 		 * Let runtime PM core know our card is active
 		 */
 		err = pm_runtime_set_active(&card->dev);
-		if (err)
+		if (err) {
+			pr_err("SDIO_ATTACH: pm_runtime_set_active failed: %d\n", err);
 			goto remove;
+		}
+		pr_info("SDIO_ATTACH: pm_runtime_set_active completed\n");
 
 		/*
 		 * Enable runtime PM for this card
 		 */
 		pm_runtime_enable(&card->dev);
+		pr_info("SDIO_ATTACH: pm_runtime_enable completed\n");
+	} else {
+		pr_info("SDIO_ATTACH: Host does not support power off, skipping runtime PM\n");
 	}
 
 	/*
 	 * The number of functions on the card is encoded inside
 	 * the ocr.
 	 */
+	/* Step 7. Parsing Functions */
 	funcs = (ocr & 0x70000000) >> 28;
+	pr_info("SDIO_ATTACH: Step 7 - Card has %d functions (from OCR: 0x%08x)\n", funcs, ocr);
 	card->sdio_funcs = 0;
 
 	/*
 	 * Initialize (but don't add) all present functions.
 	 */
+	/* Step 8. Initializing Functions */
+	pr_info("SDIO_ATTACH: Step 8 - Initializing %d functions\n", funcs);
 	for (i = 0; i < funcs; i++, card->sdio_funcs++) {
+		pr_info("SDIO_ATTACH: Initializing function %d of %d\n", i + 1, funcs);
+
 		err = sdio_init_func(host->card, i + 1);
-		if (err)
+		if (err) {
+			pr_err("SDIO_ATTACH: Function %d initialization FAILED: %d\n", i + 1, err);
 			goto remove;
+		}
+		pr_info("SDIO_ATTACH: Function %d initialized successfully\n", i + 1);
+
+		if (card->sdio_func[i]) {
+			pr_info("SDIO_ATTACH: Funtion %d - vendor: 0x%04x, device: 0x%04x, class:0x%02x\n",
+			i + 1, card->sdio_func[i]->vendor, card->sdio_func[i]->device, card->sdio_func[i]->class);
+		}
 
 		/*
 		 * Enable Runtime PM for this func (if supported)
 		 */
-		if (host->caps & MMC_CAP_POWER_OFF_CARD)
+		if (host->caps & MMC_CAP_POWER_OFF_CARD) {
 			pm_runtime_enable(&card->sdio_func[i]->dev);
+			pr_info("SDIO_ATTACH: Runtime PM enabled for function %d\n", i + 1);
+		}
 	}
+	pr_info("SDIO_ATTACH: All %d functions initialized successfully\n", funcs);
 
 	/*
 	 * First add the card to the driver model...
 	 */
+	/* Step 9. Add Card to Device Model */
+	pr_info("SDIO_ATTACH: Step 9 - Adding card to device model\n");
 	mmc_release_host(host);
+	pr_info("SDIO_ATTACH: Host released, calling mmc_add_card\n");
+
 	err = mmc_add_card(host->card);
-	if (err)
+	if (err) {
+		pr_err("SDIO_ATTACH: mmc_add_card FAILED: %d\n", err);
 		goto remove_added;
+	}
+	pr_info("SDIO_ATTACH: mmc_add_card completed successfully\n");
 
 	/*
 	 * ...then the SDIO functions.
 	 */
+	/* Step 10. Add SDIO Functions */
+	pr_info("SDIO_ATTACH: Step 10 - Adding SDIO functions to device model\n");
 	for (i = 0;i < funcs;i++) {
+		pr_info("SDIO_ATTACH: Adding function %d to device model\n", i + 1);
+
 		err = sdio_add_func(host->card->sdio_func[i]);
-		if (err)
+		if (err) {
+			pr_err("SDIO_ATTACH: sdio_add_func for function %d FAILED: %d\n", i + 1, err);
 			goto remove_added;
+		}
+		pr_info("SDIO_ATTACH: Function %d added to device model successfully\n", i + 1);
 	}
 
-	if (host->caps & MMC_CAP_POWER_OFF_CARD)
+	/* Step 11. Final setup */
+	pr_info("SDIO_ATTACH: Step 11 - Final setup\n");
+	if (host->caps & MMC_CAP_POWER_OFF_CARD) {
 		pm_runtime_put(&card->dev);
+		pr_info("SDIO_ATTACH: pm_runtime_put completed\n");
+	}
 
 	mmc_claim_host(host);
+	pr_info("SDIO_ATTACH: Host reclaimed\n");
+
+	pr_info("SDIO_ATTACH: SUCCESS! Final host state:\n");
+	pr_info("SDIO_ATTACH: - Power mode: %d\n", host->ios.power_mode);
+	pr_info("SDIO_ATTACH: - Clock: %u Hz\n", host->ios.clock);
+	pr_info("SDIO_ATTACH: - Signal voltage: %d\n", host->ios.signal_voltage);
+	pr_info("SDIO_ATTACH: - Timing: %d\n", host->ios.timing);
+	pr_info("SDIO_ATTACH: - Bus width: %d\n", host->ios.bus_width);
+	pr_info("SDIO_ATTACH: SDIO attachment completed successfully\n");
+
 	return 0;
 
 
 remove:
+	pr_err("SDIO_ATTACH: Reached remove label, error: %d\n", err);
 	mmc_release_host(host);
 remove_added:
 	/*
@@ -1381,11 +1471,13 @@ remove_added:
 	 * because it needs to be active to remove any function devices that
 	 * were probed, and after that it gets deleted.
 	 */
+	pr_err("SDIO_ATTACH: Reached remove_added label, cleaning up\n");
 	mmc_sdio_remove(host);
 	mmc_claim_host(host);
 err:
+	pr_err("SDIO_ATTACH: Reached err label, detaching bus\n");
 	mmc_detach_bus(host);
-
+	pr_err("SDIO_ATTACH: FAILED with error: %d\n", err);
 	pr_err("%s: error %d whilst initialising SDIO card\n",
 		mmc_hostname(host), err);
 
