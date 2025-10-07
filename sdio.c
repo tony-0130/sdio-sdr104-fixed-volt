@@ -536,12 +536,14 @@ static int sdio_set_bus_speed_mode(struct mmc_card *card)
 			timing = MMC_TIMING_UHS_SDR104;
 			card->sw_caps.uhs_max_dtr = UHS_SDR104_MAX_DTR;
 			card->sd_bus_speed = UHS_SDR104_BUS_SPEED;
+			pr_info("speed = UHS_SDR104_BUS_SPEED\n");
 	} else if ((card->host->caps & MMC_CAP_UHS_DDR50) &&
 		   (card->sw_caps.sd3_bus_mode & SD_MODE_UHS_DDR50)) {
 			bus_speed = SDIO_SPEED_DDR50;
 			timing = MMC_TIMING_UHS_DDR50;
 			card->sw_caps.uhs_max_dtr = UHS_DDR50_MAX_DTR;
 			card->sd_bus_speed = UHS_DDR50_BUS_SPEED;
+			pr_info("speed = UHS_DDR50_BUS_SPEED\n");
 	} else if ((card->host->caps & (MMC_CAP_UHS_SDR104 |
 		    MMC_CAP_UHS_SDR50)) && (card->sw_caps.sd3_bus_mode &
 		    SD_MODE_UHS_SDR50)) {
@@ -667,6 +669,7 @@ static int mmc_sdio_init_card(struct mmc_host *host, u32 ocr,
 	WARN_ON(!host->claimed);
 
 	/* to query card if 1.8V signalling is supported */
+	pr_info("SDIO: mmc_host_uhs\n");
 	if (mmc_host_uhs(host))
 		ocr |= R4_18V_PRESENT;
 
@@ -679,6 +682,7 @@ try_again:
 	/*
 	 * Inform the card of the voltage
 	 */
+	pr_info("SDIO: mmc_send_io_op_cond\n");
 	err = mmc_send_io_op_cond(host, ocr, &rocr);
 	if (err)
 		return err;
@@ -686,6 +690,7 @@ try_again:
 	/*
 	 * For SPI, enable CRC as appropriate.
 	 */
+	pr_info("SDIO: mmc_host_is_spi\n");
 	if (mmc_host_is_spi(host)) {
 		err = mmc_spi_set_crc(host, use_spi_crc);
 		if (err)
@@ -695,31 +700,31 @@ try_again:
 	/*
 	 * Allocate card structure.
 	 */
+	pr_info("SDIO: mmc_alloc_card\n");
 	card = mmc_alloc_card(host, &sdio_type);
 	if (IS_ERR(card))
 		return PTR_ERR(card);
 
-	if ((rocr & R4_MEMORY_PRESENT) &&
-	    mmc_sd_get_cid(host, ocr & rocr, card->raw_cid, NULL) == 0) {
-		card->type = MMC_TYPE_SD_COMBO;
-
-		if (oldcard && (!mmc_card_sd_combo(oldcard) ||
-		    memcmp(card->raw_cid, oldcard->raw_cid, sizeof(card->raw_cid)) != 0)) {
-			err = -ENOENT;
-			goto mismatch;
+	if (rocr & R4_MEMORY_PRESENT) {
+		int ret = mmc_sd_get_cid(host, ocr & rocr, card->raw_cid, NULL);	
+		pr_info("Trying to get CID, result = %d\n", ret);
+		if (ret == 0) {
+			card->type = MMC_TYPE_SD_COMBO;
+		} else {
+			pr_warn("CID read failed but R4_MEMORY_PRESENT set, fallback to SDIO\n");
+			card->type = MMC_TYPE_SDIO;
+			memset(card->raw_cid, 0, sizeof(card->raw_cid));
 		}
 	} else {
+		pr_info("SDIO-only card detected (no R4_MEMORY_PRESENT)\n");
 		card->type = MMC_TYPE_SDIO;
-
-		if (oldcard && !mmc_card_sdio(oldcard)) {
-			err = -ENOENT;
-			goto mismatch;
-		}
+		memset(card->raw_cid, 0, sizeof(card->raw_cid));
 	}
 
 	/*
 	 * Call the optional HC's init_card function to handle quirks.
 	 */
+	pr_info("SDIO: host->ops->init_card\n");
 	if (host->ops->init_card)
 		host->ops->init_card(host, card);
 	mmc_fixup_device(card, sdio_card_init_methods);
@@ -737,6 +742,7 @@ try_again:
 	 * try to init uhs card. sdio_read_cccr will take over this task
 	 * to make sure which speed mode should work.
 	 */
+	pr_info("SDIO: rocr & ocr & R4_18V_PRESENT\n");
 	if (rocr & ocr & R4_18V_PRESENT) {
 		err = mmc_set_uhs_voltage(host, ocr_card);
 		if (err == -EAGAIN) {
@@ -751,6 +757,7 @@ try_again:
 	/*
 	 * For native busses:  set card RCA and quit open drain mode.
 	 */
+	pr_info("SDIO: mmc_host_is_spi(host)\n");
 	if (!mmc_host_is_spi(host)) {
 		err = mmc_send_relative_addr(host, &card->rca);
 		if (err)
@@ -768,6 +775,7 @@ try_again:
 	/*
 	 * Read CSD, before selecting the card
 	 */
+	pr_info("SDIO: !oldcard && mmc_card_sd_combo(card)\n");
 	if (!oldcard && mmc_card_sd_combo(card)) {
 		err = mmc_sd_get_csd(card);
 		if (err)
@@ -779,12 +787,14 @@ try_again:
 	/*
 	 * Select card, as all following commands rely on that.
 	 */
+	pr_info("SDIO: !mmc_host_is_spi(host)\n");
 	if (!mmc_host_is_spi(host)) {
 		err = mmc_select_card(card);
 		if (err)
 			goto remove;
 	}
 
+	pr_info("SDIO: card->quirks & MMC_QUIRK_NONSTD_SDIO\n");
 	if (card->quirks & MMC_QUIRK_NONSTD_SDIO) {
 		/*
 		 * This is non-standard SDIO device, meaning it doesn't
@@ -810,6 +820,7 @@ try_again:
 	 * Read the common registers. Note that we should try to
 	 * validate whether UHS would work or not.
 	 */
+	pr_info("SDIO: sdio_read_cccr(card, ocr)\n");
 	err = sdio_read_cccr(card, ocr);
 	if (err) {
 		mmc_sdio_pre_init(host, ocr_card, card);
@@ -824,6 +835,7 @@ try_again:
 	/*
 	 * Read the common CIS tuples.
 	 */
+	pr_info("SDIO: sdio_read_common_cis(card)\n");
 	err = sdio_read_common_cis(card);
 	if (err)
 		goto remove;
@@ -857,13 +869,16 @@ try_again:
 	/*
 	 * If needed, disconnect card detection pull-up resistor.
 	 */
+	pr_info("SDIO: sdio_disable_cd(card)\n");
 	err = sdio_disable_cd(card);
 	if (err)
 		goto remove;
 
 	/* Initialization sequence for UHS-I cards */
 	/* Only if card supports 1.8v and UHS signaling */
+	pr_info("SDIO: (ocr & R4_18V_PRESENT) && card->sw_caps.sd3_bus_mode\n");
 	if ((ocr & R4_18V_PRESENT) && card->sw_caps.sd3_bus_mode) {
+		pr_info("SDIO: mmc_sdio_init_uhs_card(card)\n");
 		err = mmc_sdio_init_uhs_card(card);
 		if (err)
 			goto remove;
@@ -871,6 +886,7 @@ try_again:
 		/*
 		 * Switch to high-speed (if supported).
 		 */
+		pr_info("SDIO: sdio_enable_hs(card)\n");
 		err = sdio_enable_hs(card);
 		if (err > 0)
 			mmc_set_timing(card->host, MMC_TIMING_SD_HS);
@@ -880,16 +896,19 @@ try_again:
 		/*
 		 * Change to the card's maximum speed.
 		 */
+		pr_info("SDIO: mmc_set_clock\n");
 		mmc_set_clock(host, mmc_sdio_get_max_clock(card));
 
 		/*
 		 * Switch to wider bus (if supported).
 		 */
+		pr_info("SDIO: sdio_enable_4bit_bus(card)\n");
 		err = sdio_enable_4bit_bus(card);
 		if (err)
 			goto remove;
 	}
 
+	pr_info("SDIO: host->caps2 & MMC_CAP2_AVOID_3_3V && host->ios.signal_voltage == MMC_SIGNAL_VOLTAGE_330\n");
 	if (host->caps2 & MMC_CAP2_AVOID_3_3V &&
 	    host->ios.signal_voltage == MMC_SIGNAL_VOLTAGE_330) {
 		pr_err("%s: Host failed to negotiate down from 3.3V\n",
@@ -1221,6 +1240,7 @@ int mmc_attach_sdio(struct mmc_host *host)
 	 */
 	if (!rocr) {
 		err = -EINVAL;
+		pr_err("%s: voltage(s) of the card not supported\n", mmc_hostname(host));
 		goto err;
 	}
 
@@ -1228,8 +1248,10 @@ int mmc_attach_sdio(struct mmc_host *host)
 	 * Detect and init the card.
 	 */
 	err = mmc_sdio_init_card(host, rocr, NULL);
-	if (err)
+	if (err) {
+		pr_err("%s: fail to initializing the card\n", mmc_hostname(host));
 		goto err;
+	}
 
 	card = host->card;
 
@@ -1321,4 +1343,3 @@ err:
 
 	return err;
 }
-
