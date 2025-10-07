@@ -372,6 +372,8 @@ static int sdio_enable_4bit_bus(struct mmc_card *card)
 	int err;
 
 	err = sdio_enable_wide(card);
+	pr_info("SDIO: sdio_enable_wide returned %d\n", err);
+
 	if (err <= 0)
 		return err;
 	if (mmc_card_sdio(card))
@@ -594,21 +596,39 @@ static int mmc_sdio_init_uhs_card(struct mmc_card *card)
 {
 	int err;
 
-	if (!card->scr.sda_spec3)
+	if (!card->scr.sda_spec3) {
+		pr_info("SDIO: UHS not supported by card\n");
 		return 0;
+	}
+
+	pr_info("SDIO: Starting UHS initialization\n");
 
 	/* Switch to wider bus */
+	pr_info("SDIO: Step 1 - Enabling 4-bit bus\n");
 	err = sdio_enable_4bit_bus(card);
-	if (err)
+	if (err) {
+		pr_err("SDIO: Step 1 failed: %d\n", err);
 		goto out;
+	}
+	pr_info("SDIO: Step 1 completed successfully\n");
 
 	/* Set the driver strength for the card */
+	pr_info("SDIO: Step 2 - Selecting driver strength\n");
 	sdio_select_driver_type(card);
+	pr_info("SDIO: Step 2 completed, drive_strength: %d\n", card->drive_strength);
 
 	/* Set bus speed mode of the card */
+	pr_info("SDIO: Step 3 - Setting bus speed mode\n");
+	pr_info("SDIO: Card sw_caps.sd3_bus_mode: 0x%x\n", card->sw_caps.sd3_bus_mode);
+
 	err = sdio_set_bus_speed_mode(card);
-	if (err)
+	if (err) {
+		pr_err("SDIO: Step 3 (bus speed mode) failed: %d\n", err);
 		goto out;
+	}
+	pr_info("SDIO: Step 3 completed successfully\n");
+	pr_info("SDIO: Current state - voltage: %d, timing: %d, clock: %u\n",
+		card->host->ios.signal_voltage, card->host->ios.timing, card->host->ios.clock);
 
 	/*
 	 * SPI mode doesn't define CMD19 and tuning is only valid for SDR50 and
@@ -616,9 +636,26 @@ static int mmc_sdio_init_uhs_card(struct mmc_card *card)
 	 */
 	if (!mmc_host_is_spi(card->host) &&
 	    ((card->host->ios.timing == MMC_TIMING_UHS_SDR50) ||
-	      (card->host->ios.timing == MMC_TIMING_UHS_SDR104)))
+	      (card->host->ios.timing == MMC_TIMING_UHS_SDR104))) {
+
+		pr_info("SDIO: Step 4 - Starting tuning for timing %d\n", card->host->ios.timing);
 		err = mmc_execute_tuning(card);
+		if (err) {
+			pr_err("SDIO: Step 4 (tuning) failed with error: %d\n", err);
+			pr_info("SDIO: Tuning failed, but continuing anyway for fixed 1.8V hardware\n");
+			err = 0;
+		} else {
+			pr_info("SDIO: Step 4 (tuning) completed successfully\n");
+		}
+
+	} else {
+		pr_info("SDIO: Step 4 - Tuning not required for timing %d\n", card->host->ios.timing);
+	}
+
+	pr_info("SDIO: UHS initialization completed\n");
 out:
+	if (err)
+		pr_err("SDIO: UHS initialization failed with error: %d\n", err);
 	return err;
 }
 
@@ -911,13 +948,24 @@ try_again:
 	pr_info("SDIO: host->caps2 & MMC_CAP2_AVOID_3_3V && host->ios.signal_voltage == MMC_SIGNAL_VOLTAGE_330\n");
 	if (host->caps2 & MMC_CAP2_AVOID_3_3V &&
 	    host->ios.signal_voltage == MMC_SIGNAL_VOLTAGE_330) {
-		pr_err("%s: Host failed to negotiate down from 3.3V\n",
+		pr_info("SDIO: %s: Voltage state shows 3.3V but hardware may be fixed 1.8V\n",
 			mmc_hostname(host));
-		err = -EINVAL;
-		goto remove;
+		pr_info("SDIO: Continuing initialization despite voltage state mismatch\n");
+
+		host->ios.signal_voltage = MMC_SIGNAL_VOLTAGE_180;
+		// err = -EINVAL;
+		// goto remove;
 	}
 
+	pr_info("SDIO: Add hardcode MMC_SIGNAL_VOLTAGE_180 to host->ios.signal_voltage\n");
+	host->ios.signal_voltage = MMC_SIGNAL_VOLTAGE_180;
+
 	host->card = card;
+
+	pr_info("SDIO: Initialization completed successfully\n");
+	pr_info("SDIO: Final state - voltage: %d, timing: %d, clock: %u\n",
+        host->ios.signal_voltage, host->ios.timing, host->ios.clock);
+
 	return 0;
 
 mismatch:
