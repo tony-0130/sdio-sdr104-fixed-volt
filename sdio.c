@@ -1388,6 +1388,28 @@ int mmc_attach_sdio(struct mmc_host *host)
 		pr_info("SDIO_ATTACH: Initializing function %d of %d\n", i + 1, funcs);
 
 		err = sdio_init_func(host->card, i + 1);
+
+		if (err == -110) {
+			pr_warn("SDIO_ATTACH: Function %d init timeout at high speed, trying lower clock\n", i + 1);
+
+			unsigned int orig_clock = host->ios.clock;
+			unsigned int orig_timing = host->ios.timing;
+
+			pr_info("SDIO_ATTACH: Lowering clock to 25MHz for retry\n");
+			mmc_set_clock(host, 25000000);
+
+			err = sdio_init_func(host->card, i + 1);
+
+			if (err == 0) {
+				pr_info("SDIO_ATTACH: Function %d init succeeded at lower clock\n", i + 1);
+			} else {
+				pr_err("SDIO_ATTACH: Function %d init failed even at lower clock: %d\n", i + 1, err);
+			}
+
+			pr_info("SDIO_ATTACH: Restoring original clock: %u Hz\n", orig_clock);
+			mmc_set_clock(host, orig_clock);
+		}
+
 		if (err) {
 			pr_err("SDIO_ATTACH: Function %d initialization FAILED: %d\n", i + 1, err);
 			goto remove;
@@ -1395,8 +1417,8 @@ int mmc_attach_sdio(struct mmc_host *host)
 		pr_info("SDIO_ATTACH: Function %d initialized successfully\n", i + 1);
 
 		if (card->sdio_func[i]) {
-			pr_info("SDIO_ATTACH: Funtion %d - vendor: 0x%04x, device: 0x%04x, class:0x%02x\n",
-			i + 1, card->sdio_func[i]->vendor, card->sdio_func[i]->device, card->sdio_func[i]->class);
+			pr_info("SDIO_ATTACH: Function %d - vendor: 0x%04x, device: 0x%04x, class: 0x%02x\n",
+				i + 1, card->sdio_func[i]->vendor, card->sdio_func[i]->device, card->sdio_func[i]->class);
 		}
 
 		/*
